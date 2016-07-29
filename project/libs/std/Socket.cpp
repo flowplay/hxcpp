@@ -320,69 +320,72 @@ static value socket_read( value o ) {
 }
 
 /**
-	host_resolve : string -> 'int32
+	host_resolve : 'string -> string
 	<doc>Resolve the given host string into an IP address.</doc>
 **/
 static value host_resolve( value host ) {
-	unsigned int ip;
-	val_check(host,string);
+    val_check(host,string);
 
-   const char *hostName = val_string(host);
-   gc_enter_blocking();
-	ip = inet_addr(hostName);
-	if( ip == INADDR_NONE ) {
-		struct hostent *h;
-#	if defined(NEKO_WINDOWS) || defined(NEKO_MAC) || defined(BLACKBERRY) || defined(EMSCRIPTEN)
-		h = gethostbyname(hostName);
-#	else
-		struct hostent hbase;
-		char buf[1024];
-		int errcode;
-		gethostbyname_r(hostName,&hbase,buf,1024,&h,&errcode);
-#	endif
-		if( h == NULL ) {
-         gc_exit_blocking();
-			return alloc_null();
-      }
-		ip = *((unsigned int*)h->h_addr);
-	}
-   gc_exit_blocking();
-	return alloc_int32(ip);
+    const char *hostName = val_string(host);
+
+	struct addrinfo* addr_result;
+    int result = getaddrinfo(hostName, NULL, NULL, &addr_result);
+
+    char address[INET6_ADDRSTRLEN];
+    if (addr_result->ai_family == AF_INET) {
+        inet_ntop(AF_INET,
+                  &((struct sockaddr_in *)addr_result->ai_addr)->sin_addr,
+                  address,
+                  sizeof(address));
+    }
+    else {
+        inet_ntop(AF_INET6,
+                  &((struct sockaddr_in6 *)addr_result->ai_addr)->sin6_addr,
+                  address,
+                  sizeof(address));
+    }
+    freeaddrinfo(addr_result);
+
+    return alloc_string( address );
 }
 
 /**
-	host_to_string : 'int32 -> string
+	host_to_string : 'string -> string
 	<doc>Return a string representation of the IP address.</doc>
 **/
 static value host_to_string( value ip ) {
-	struct in_addr i;
-	val_check(ip,int);
-	*(int*)&i = val_int(ip);
-	return alloc_string( inet_ntoa(i) );
+	return ip;
 }
 
 /**
-	host_reverse : 'int32 -> string
+	host_reverse : 'string -> string
 	<doc>Reverse the DNS of the given IP address.</doc>
 **/
 static value host_reverse( value host ) {
-	struct hostent *h;
-	unsigned int ip;
-	val_check(host,int);
-	ip = val_int(host);
-   gc_enter_blocking();
-#	if defined(NEKO_WINDOWS) || defined(NEKO_MAC) || defined(ANDROID) || defined(BLACKBERRY) || defined(EMSCRIPTEN)
-	h = gethostbyaddr((char *)&ip,4,AF_INET);
-#	else
-	struct hostent htmp;
-	int errcode;
-	char buf[1024];
-	gethostbyaddr_r((char *)&ip,4,AF_INET,&htmp,buf,1024,&h,&errcode);
-#	endif
-   gc_exit_blocking();
-	if( h == NULL )
-		return alloc_null();
-	return alloc_string( h->h_name );
+	val_check(host,string);
+
+    int len;
+    struct sockaddr* addr;
+    unsigned char ip[16];
+	if (inet_pton(AF_INET, val_string(host), ip) == 1) {
+         struct sockaddr_in addr4;
+         len = sizeof(addr4);
+         memset(&addr4,0,len);
+         *(int*)&addr4.sin_addr.s_addr = *(int*)ip;
+         addr = (struct sockaddr*)&addr4;
+    }
+    else if (inet_pton(AF_INET, val_string(host), ip) == 1) {
+         struct sockaddr_in6 addr6;
+         len = sizeof(addr6);
+         memset(&addr6,0,len);
+         memcpy(&addr6.sin6_addr.s6_addr, &ip, 16);
+         addr = (struct sockaddr*)&addr6;
+    }
+
+    char hostname[NI_MAXHOST];
+    int error = getnameinfo(addr, sizeof(*addr), hostname, NI_MAXHOST, NULL, 0, 0);
+
+    return alloc_string( hostname );
 }
 
 /**
@@ -402,19 +405,35 @@ static value host_local() {
 }
 
 /**
-	socket_connect : 'socket -> host:'int32 -> port:int -> void
+	socket_connect : 'socket -> host:'string -> port:int -> void
 	<doc>Connect the socket the given [host] and [port]</doc>
 **/
 static value socket_connect( value o, value host, value port ) {
-	struct sockaddr_in addr;
-	val_check(host,int);
-	val_check(port,int);
-	memset(&addr,0,sizeof(addr));
-	addr.sin_family = AF_INET;
-	addr.sin_port = htons(val_int(port));
-	*(int*)&addr.sin_addr.s_addr = val_int(host);
+    val_check(host,string);
+    val_check(port,int);
+
+    struct sockaddr* addr;
+    unsigned char ip[16];
+
+    if (inet_pton(AF_INET, val_string(host), ip) == 1) {
+         struct sockaddr_in addr4;
+         memset(&addr4,0,sizeof(addr4));
+         addr4.sin_family = AF_INET;
+         addr4.sin_port = htons(val_int(port));
+         *(int*)&addr4.sin_addr.s_addr = *(int*)ip;
+         addr = (struct sockaddr*)&addr4;
+    }
+    else if (inet_pton(AF_INET6, val_string(host), ip) == 1) {
+         struct sockaddr_in6 addr6;
+         memset(&addr6,0,sizeof(addr6));
+         addr6.sin6_family = AF_INET6;
+         addr6.sin6_port = htons(val_int(port));
+         memcpy(&addr6.sin6_addr.s6_addr, &ip, 16);
+         addr = (struct sockaddr*)&addr6;
+    }
+
 	gc_enter_blocking();
-	if( connect(val_sock(o),(struct sockaddr*)&addr,sizeof(addr)) != 0 )
+	if( connect(val_sock(o),addr,sizeof(*addr)) != 0 )
 	{
 		// This will throw a "Blocking" exception if the "error" was because
 		// it's a non-blocking socket with connection in progress, otherwise
