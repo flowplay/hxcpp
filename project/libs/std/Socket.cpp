@@ -63,6 +63,23 @@ extern field id___s;
 static field f_host;
 static field f_port;
 
+/*
+ * Pack a 32bit address from a char buffer to a 32bit unsigned int
+ */
+void pack_addr(uint32_t* i, const char* s) {
+    *i = 0;
+    *i |= ((uint32_t)(s[0]) << 24) & 0xff000000;
+    *i |= ((uint32_t)(s[1]) << 16) & 0x00ff0000;
+    *i |= ((uint32_t)(s[2]) << 8)  & 0x0000ff00;
+    *i |= ((uint32_t)(s[3]))       & 0x000000ff;
+}
+
+void unpack_addr(char* s, uint32_t i) {
+   s[0] = (uint8_t)(((i & 0xff000000) >> 24) & 0xff);
+   s[1] = (uint8_t)(((i & 0x00ff0000) >> 16) & 0xff);
+   s[2] = (uint8_t)(((i & 0x0000ff00) >> 8) & 0xff);
+   s[3] = (uint8_t)(i & 0x000000ff);
+}
 
 sockaddr* make_sockaddr(char* address_data, int port) {
     struct sockaddr* addr = NULL;
@@ -72,10 +89,9 @@ sockaddr* make_sockaddr(char* address_data, int port) {
         memset(addr4, 0, sizeof(struct sockaddr_in));
         addr4->sin_family = AF_INET;
         addr4->sin_port = htons(port);
-        addr4->sin_addr.s_addr |= (address_data[3] << 24) & 0xff000000;
-        addr4->sin_addr.s_addr |= (address_data[2] << 16) & 0x00ff0000;
-        addr4->sin_addr.s_addr |= (address_data[1] << 8)  & 0x0000ff00;
-        addr4->sin_addr.s_addr |= (address_data[0])       & 0x000000ff;
+
+        pack_addr(&(addr4->sin_addr.s_addr), address_data);
+
         addr = (struct sockaddr*)addr4;
     }
     else if (strlen(address_data) == 16) {
@@ -95,16 +111,19 @@ buffer sockaddr_to_buffer(struct sockaddr* addr) {
     char* address_data;
     buffer address_out;
     if (addr->sa_family == AF_INET) {
-        address_out = alloc_buffer_len(4);
+        address_out = alloc_buffer_len(5);
         address_data = buffer_data(address_out);
-        for(int i=0; i < 4; i++) {
-            address_data[i] = ((struct sockaddr_in*)addr)->sin_addr.s_addr >> (8 * i);
-        }
+
+        unpack_addr(address_data, ((struct sockaddr_in*)addr)->sin_addr.s_addr);
+
+        address_data[4] = '\0';
     }
     else {
-        address_out = alloc_buffer_len(16);
+        address_out = alloc_buffer_len(17);
         address_data = buffer_data(address_out);
         memcpy(&address_data, &(((struct sockaddr_in6*)addr)->sin6_addr.s6_addr), 16);
+        address_data[16] = '\0';
+
     }
 
     return address_out;
@@ -373,6 +392,7 @@ static value socket_read( value o ) {
 static value host_resolve( value host ) {
     val_check(host,string);
 
+
 	struct addrinfo* addr_result;
     int result = getaddrinfo(val_string(host), NULL, NULL, &addr_result);
     buffer address_out = sockaddr_to_buffer(addr_result->ai_addr);
@@ -445,6 +465,8 @@ static value host_local() {
 static value socket_connect( value o, value host, value port ) {
     val_check(host, buffer);
     val_check(port,int);
+
+    char* address_data = buffer_data(val_to_buffer(host));
 
     struct sockaddr* addr = make_sockaddr(buffer_data(val_to_buffer(host)), val_int(port));
 
