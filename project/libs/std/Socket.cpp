@@ -63,72 +63,6 @@ extern field id___s;
 static field f_host;
 static field f_port;
 
-/*
- * Pack a 32bit address from a char buffer to a 32bit unsigned int
- */
-void pack_addr(uint32_t* i, const char* s) {
-    *i = 0;
-    *i |= ((uint32_t)(s[0]) << 24) & 0xff000000;
-    *i |= ((uint32_t)(s[1]) << 16) & 0x00ff0000;
-    *i |= ((uint32_t)(s[2]) << 8)  & 0x0000ff00;
-    *i |= ((uint32_t)(s[3]))       & 0x000000ff;
-}
-
-void unpack_addr(char* s, uint32_t i) {
-   s[0] = (uint8_t)(((i & 0xff000000) >> 24) & 0xff);
-   s[1] = (uint8_t)(((i & 0x00ff0000) >> 16) & 0xff);
-   s[2] = (uint8_t)(((i & 0x0000ff00) >> 8) & 0xff);
-   s[3] = (uint8_t)(i & 0x000000ff);
-}
-
-sockaddr* make_sockaddr(char* address_data, int port) {
-    struct sockaddr* addr = NULL;
-
-	if (strlen(address_data) == 4) {
-	    struct sockaddr_in *addr4 = (struct sockaddr_in*)malloc(sizeof(struct sockaddr_in));
-        memset(addr4, 0, sizeof(struct sockaddr_in));
-        addr4->sin_family = AF_INET;
-        addr4->sin_port = htons(port);
-
-        pack_addr(&(addr4->sin_addr.s_addr), address_data);
-
-        addr = (struct sockaddr*)addr4;
-    }
-    else if (strlen(address_data) == 16) {
-        struct sockaddr_in6 *addr6 = (struct sockaddr_in6*)malloc(sizeof(struct sockaddr_in6));
-        memset(addr6, 0, sizeof(struct sockaddr_in6));
-        addr6->sin6_family = AF_INET6;
-        addr6->sin6_port = htons(port);
-        memcpy(&(addr6->sin6_addr.s6_addr), &address_data, 16);
-        addr = (struct sockaddr*)addr6;
-    }
-
-    return addr;
-}
-
-buffer sockaddr_to_buffer(struct sockaddr* addr) {
-
-    char* address_data;
-    buffer address_out;
-    if (addr->sa_family == AF_INET) {
-        address_out = alloc_buffer_len(5);
-        address_data = buffer_data(address_out);
-
-        unpack_addr(address_data, ((struct sockaddr_in*)addr)->sin_addr.s_addr);
-
-        address_data[4] = '\0';
-    }
-    else {
-        address_out = alloc_buffer_len(17);
-        address_data = buffer_data(address_out);
-        memcpy(&address_data, &(((struct sockaddr_in6*)addr)->sin6_addr.s6_addr), 16);
-        address_data[16] = '\0';
-
-    }
-
-    return address_out;
-}
-
 
 SOCKET val_sock(value inValue)
 {
@@ -193,13 +127,14 @@ static value socket_init() {
 	socket_new : udp:bool -> 'socket
 	<doc>Create a new socket, TCP or UDP</doc>
 **/
-static value socket_new( value udp ) {
+static value socket_new( value udp, value ipv6 ) {
 	SOCKET s;
 	val_check(udp,bool);
+	val_check(ipv6,bool);
 	if( val_bool(udp) )
-		s = socket(AF_INET,SOCK_DGRAM,0);
+		s = socket(val_bool(ipv6) ? AF_INET6 : AF_INET,SOCK_DGRAM,0);
 	else
-		s = socket(AF_INET,SOCK_STREAM,0);
+		s = socket(val_bool(ipv6) ? AF_INET6 : AF_INET,SOCK_STREAM,0);
 	if( s == INVALID_SOCKET )
 		return alloc_null();
 #	ifdef NEKO_MAC
@@ -386,58 +321,70 @@ static value socket_read( value o ) {
 }
 
 /**
-	host_resolve : 'string -> buffer
+	host_resolve : 'string -> string
 	<doc>Resolve the given host string into an IP address.</doc>
 **/
 static value host_resolve( value host ) {
     val_check(host,string);
 
+    const char *hostName = val_string(host);
 
 	struct addrinfo* addr_result;
-    int result = getaddrinfo(val_string(host), NULL, NULL, &addr_result);
-    buffer address_out = sockaddr_to_buffer(addr_result->ai_addr);
+    int result = getaddrinfo(hostName, NULL, NULL, &addr_result);
+
+    char address[INET6_ADDRSTRLEN];
+    if (addr_result->ai_family == AF_INET) {
+        inet_ntop(AF_INET,
+                  &((struct sockaddr_in *)addr_result->ai_addr)->sin_addr,
+                  address,
+                  sizeof(address));
+    }
+    else {
+        inet_ntop(AF_INET6,
+                  &((struct sockaddr_in6 *)addr_result->ai_addr)->sin6_addr,
+                  address,
+                  sizeof(address));
+    }
     freeaddrinfo(addr_result);
 
-    return buffer_val(address_out);
+    return alloc_string( address );
 }
 
 /**
-	host_to_string : 'buffer -> string
+	host_to_string : 'string -> string
 	<doc>Return a string representation of the IP address.</doc>
 **/
 static value host_to_string( value ip ) {
-    val_check(ip, buffer);
-    char* address_data =  buffer_data(val_to_buffer(ip));
-
-    char address[INET6_ADDRSTRLEN];
-    if (strlen(address_data) == 4) {
-        uint32_t addr_in = 0;
-        addr_in |= (address_data[3] << 24) & 0xff000000;
-        addr_in |= (address_data[2] << 16) & 0x00ff0000;
-        addr_in |= (address_data[1] << 8)  & 0x0000ff00;
-        addr_in |= (address_data[0])       & 0x000000ff;
-        inet_ntop(AF_INET, &addr_in, address, sizeof(address));
-    }
-    else if (strlen(address_data) == 16) {
-        char addr_in6[16];
-        memcpy(&addr_in6, &address_data, 16);
-        inet_ntop(AF_INET6, &addr_in6, address, sizeof(address));
-    }
-
-    return alloc_string(address);
+	return ip;
 }
 
 /**
-	host_reverse : 'buffer -> string
+	host_reverse : 'string -> string
 	<doc>Reverse the DNS of the given IP address.</doc>
 **/
 static value host_reverse( value host ) {
-	val_check(host, buffer);
+	val_check(host,string);
 
-    struct sockaddr* addr = make_sockaddr(buffer_data(val_to_buffer(host)), 0);
+    int len;
+    struct sockaddr* addr;
+    unsigned char ip[16];
+	if (inet_pton(AF_INET, val_string(host), ip) == 1) {
+         struct sockaddr_in addr4;
+         len = sizeof(addr4);
+         memset(&addr4,0,len);
+         *(int*)&addr4.sin_addr.s_addr = *(int*)ip;
+         addr = (struct sockaddr*)&addr4;
+    }
+    else if (inet_pton(AF_INET, val_string(host), ip) == 1) {
+         struct sockaddr_in6 addr6;
+         len = sizeof(addr6);
+         memset(&addr6,0,len);
+         memcpy(addr6.sin6_addr.s6_addr, ip, 16);
+         addr = (struct sockaddr*)&addr6;
+    }
+
     char hostname[NI_MAXHOST];
     int error = getnameinfo(addr, sizeof(*addr), hostname, NI_MAXHOST, NULL, 0, 0);
-    free(addr);
 
     return alloc_string( hostname );
 }
@@ -459,19 +406,40 @@ static value host_local() {
 }
 
 /**
-	socket_connect : 'socket -> host:'buffer -> port:int -> void
+	socket_connect : 'socket -> host:'string -> port:int -> void
 	<doc>Connect the socket the given [host] and [port]</doc>
 **/
 static value socket_connect( value o, value host, value port ) {
-    val_check(host, buffer);
+    val_check(host,string);
     val_check(port,int);
 
-    char* address_data = buffer_data(val_to_buffer(host));
+    struct sockaddr* addr;
+    struct sockaddr_in addr4;
+    struct sockaddr_in6 addr6;
+    unsigned char ip[16];
+    int len = 0;
 
-    struct sockaddr* addr = make_sockaddr(buffer_data(val_to_buffer(host)), val_int(port));
+    if (inet_pton(AF_INET, val_string(host), ip) == 1) {
+
+         memset(&addr4,0,sizeof(addr4));
+         addr4.sin_family = AF_INET;
+         addr4.sin_port = htons(val_int(port));
+         *(int*)&addr4.sin_addr.s_addr = *(int*)ip;
+         addr = (struct sockaddr*)&addr4;
+         len = sizeof (struct sockaddr_in);
+    }
+    else if (inet_pton(AF_INET6, val_string(host), ip) == 1) {
+
+         memset(&addr6,0,sizeof(addr6));
+         addr6.sin6_family = AF_INET6;
+         addr6.sin6_port = htons(val_int(port));
+         memcpy(addr6.sin6_addr.s6_addr, ip, 16);
+         addr = (struct sockaddr*)&addr6;
+         len = sizeof (struct sockaddr_in6);
+    }
 
 	gc_enter_blocking();
-	if( connect(val_sock(o),addr,sizeof(*addr)) != 0 )
+	if( connect(val_sock(o),addr,len) != 0 )
 	{
 		// This will throw a "Blocking" exception if the "error" was because
 		// it's a non-blocking socket with connection in progress, otherwise
@@ -482,9 +450,6 @@ static value socket_connect( value o, value host, value port ) {
 		val_throw(alloc_string("std@socket_connect"));
 	}
 	gc_exit_blocking();
-
-	free(addr);
-
 	return alloc_bool(true);
 }
 
@@ -660,31 +625,29 @@ static value socket_fast_select( value rs, value ws, value es, value timeout )
 }
 
 /**
-	socket_bind : 'socket -> host : 'buffer -> port:int -> void
+	socket_bind : 'socket -> host : 'int -> port:int -> void
 	<doc>Bind the socket for server usage on the given host and port</doc>
 **/
 static value socket_bind( value o, value host, value port ) {
 	int opt = 1;
-
+	struct sockaddr_in addr;
 	SOCKET sock = val_sock(o);
-	val_check(host,buffer);
+	val_check(host,int);
 	val_check(port,int);
-
-    struct sockaddr* addr = make_sockaddr(buffer_data(val_to_buffer(host)), val_int(port));
-
+	memset(&addr,0,sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(val_int(port));
+	*(int*)&addr.sin_addr.s_addr = val_int(host);
 	#ifndef NEKO_WINDOWS
 	setsockopt(sock,SOL_SOCKET,SO_REUSEADDR,(char*)&opt,sizeof(opt));
 	#endif
 	gc_enter_blocking();
-	if( bind(sock,addr,sizeof(*addr)) == SOCKET_ERROR )
+	if( bind(sock,(struct sockaddr*)&addr,sizeof(addr)) == SOCKET_ERROR )
 	{
 		gc_exit_blocking();
 		val_throw(alloc_string("Bind failed"));
 	}
 	gc_exit_blocking();
-
-	free(addr);
-
 	return alloc_bool(true);
 }
 
@@ -702,9 +665,11 @@ static value socket_bind( value o, value host, value port ) {
 #endif
 static value socket_accept( value o ) {
 	SOCKET sock = val_sock(o);
+	struct sockaddr_in addr;
+	SockLen addrlen = sizeof(addr);
 	SOCKET s;
 	gc_enter_blocking();
-	s = accept(sock,NULL,NULL);
+	s = accept(sock,(struct sockaddr*)&addr,&addrlen);
 	if( s == INVALID_SOCKET )
 		return block_error();
 	gc_exit_blocking();
@@ -717,7 +682,7 @@ static value socket_accept( value o ) {
 **/
 static value socket_peer( value o ) {
 	SOCKET sock = val_sock(o);
-	struct sockaddr_storage addr;
+	struct sockaddr_in addr;
 	SockLen addrlen = sizeof(addr);
 	value ret;
    gc_enter_blocking();
@@ -728,14 +693,8 @@ static value socket_peer( value o ) {
    }
    gc_exit_blocking();
 	ret = alloc_array(2);
-    if (addr.ss_family == AF_INET) {
-        val_array_set_i(ret,0,buffer_val(sockaddr_to_buffer((struct sockaddr*)&addr)));
-        val_array_set_i(ret,1,alloc_int(ntohs(((struct sockaddr_in*)&addr)->sin_port)));
-    }
-    else {
-        val_array_set_i(ret,0,buffer_val(sockaddr_to_buffer((struct sockaddr*)&addr)));
-        val_array_set_i(ret,1,alloc_int(ntohs(((struct sockaddr_in6*)&addr)->sin6_port)));
-    }
+	val_array_set_i(ret,0,alloc_int32(*(int*)&addr.sin_addr));
+	val_array_set_i(ret,1,alloc_int(ntohs(addr.sin_port)));
 	return ret;
 }
 
@@ -745,27 +704,19 @@ static value socket_peer( value o ) {
 **/
 static value socket_host( value o ) {
 	SOCKET sock = val_sock(o);
-	struct sockaddr_storage addr;
+	struct sockaddr_in addr;
 	SockLen addrlen = sizeof(addr);
 	value ret;
-    gc_enter_blocking();
+   gc_enter_blocking();
 	if( getsockname(sock,(struct sockaddr*)&addr,&addrlen) == SOCKET_ERROR )
    {
       gc_exit_blocking();
 		return alloc_null();
    }
    gc_exit_blocking();
-
-    ret = alloc_array(2);
-    if (addr.ss_family == AF_INET) {
-        val_array_set_i(ret,0,buffer_val(sockaddr_to_buffer((struct sockaddr*)&addr)));
-        val_array_set_i(ret,1,alloc_int(ntohs(((struct sockaddr_in*)&addr)->sin_port)));
-    }
-    else {
-        val_array_set_i(ret,0,buffer_val(sockaddr_to_buffer((struct sockaddr*)&addr)));
-        val_array_set_i(ret,1,alloc_int(ntohs(((struct sockaddr_in6*)&addr)->sin6_port)));
-    }
-
+	ret = alloc_array(2);
+	val_array_set_i(ret,0,alloc_int32(*(int*)&addr.sin_addr));
+	val_array_set_i(ret,1,alloc_int(ntohs(addr.sin_port)));
 	return ret;
 }
 
@@ -1091,7 +1042,7 @@ static value socket_poll( value socks, value pdata, value timeout ) {
 static value socket_send_to( value o, value dataBuf, value pos, value len, value vaddr ) {
 	int p,l;
 	value host, port;
-
+	struct sockaddr_in addr;
 	val_check_kind(o,k_socket);
    buffer buf = val_to_buffer(dataBuf);
 	const char *cdata = buffer_data(buf);
@@ -1101,27 +1052,26 @@ static value socket_send_to( value o, value dataBuf, value pos, value len, value
 	val_check(vaddr,object);
 	host = val_field(vaddr, f_host);
 	port = val_field(vaddr, f_port);
-	val_check(host,buffer);
+	val_check(host,int);
 	val_check(port,int);
 	p = val_int(pos);
 	l = val_int(len);
-
-	struct sockaddr* addr = make_sockaddr(buffer_data(val_to_buffer(host)), val_int(port));
-
+	memset(&addr,0,sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(val_int(port));
+	*(int*)&addr.sin_addr.s_addr = val_int(host);
 	if( p < 0 || l < 0 || p > dlen || p + l > dlen )
 		neko_error();
 
    SOCKET sock = val_sock(o);
 	gc_enter_blocking();
 	POSIX_LABEL(send_again);
-	dlen = sendto(sock, cdata + p , l, MSG_NOSIGNAL, addr, sizeof(*addr));
+	dlen = sendto(sock, cdata + p , l, MSG_NOSIGNAL, (struct sockaddr*)&addr, sizeof(addr));
 	if( dlen == SOCKET_ERROR ) {
 		HANDLE_EINTR(send_again);
 		return block_error();
 	}
 	gc_exit_blocking();
-
-	free(addr);
 	return alloc_int(dlen);
 }
 
@@ -1135,7 +1085,7 @@ static value socket_send_to( value o, value dataBuf, value pos, value len, value
 static value socket_recv_from( value o, value dataBuf, value pos, value len, value addr ) {
 	int p,l,ret;
 	int retry = 0;
-	struct sockaddr_storage saddr;
+	struct sockaddr_in saddr;
 	SockLen slen = sizeof(saddr);
 	val_check_kind(o,k_socket);
 	val_check(dataBuf,buffer);
@@ -1162,16 +1112,8 @@ static value socket_recv_from( value o, value dataBuf, value pos, value len, val
 		return block_error();
 	}
    gc_exit_blocking();
-
-   if (saddr.ss_family == AF_INET) {
-       alloc_field(addr,f_host,buffer_val(sockaddr_to_buffer((struct sockaddr*)&saddr)));
-       val_array_set_i(addr,f_port,alloc_int(ntohs(((struct sockaddr_in*)&saddr)->sin_port)));
-   }
-   else {
-       val_array_set_i(addr,f_host,buffer_val(sockaddr_to_buffer((struct sockaddr*)&saddr)));
-       val_array_set_i(addr,f_port,alloc_int(ntohs(((struct sockaddr_in6*)&saddr)->sin6_port)));
-   }
-
+	alloc_field(addr,f_host,alloc_int32(*(int*)&saddr.sin_addr));
+	alloc_field(addr,f_port,alloc_int(ntohs(saddr.sin_port)));
 	return alloc_int(ret);
 }
 
@@ -1180,7 +1122,7 @@ static value socket_recv_from( value o, value dataBuf, value pos, value len, val
 
 
 DEFINE_PRIM(socket_init,0);
-DEFINE_PRIM(socket_new,1);
+DEFINE_PRIM(socket_new,2);
 DEFINE_PRIM(socket_send,4);
 DEFINE_PRIM(socket_send_char,2);
 DEFINE_PRIM(socket_recv,4);
