@@ -325,27 +325,34 @@ static value socket_read( value o ) {
 	<doc>Resolve the given host string into an IP address.</doc>
 **/
 static value host_resolve( value host ) {
+    char address[INET6_ADDRSTRLEN];
     val_check(host,string);
 
-    const char *hostName = val_string(host);
+    gc_enter_blocking();
 
+    const char *hostName = val_string(host);
 	struct addrinfo* addr_result;
     int result = getaddrinfo(hostName, NULL, NULL, &addr_result);
 
-    char address[INET6_ADDRSTRLEN];
-    if (addr_result->ai_family == AF_INET) {
-        inet_ntop(AF_INET,
-                  &((struct sockaddr_in *)addr_result->ai_addr)->sin_addr,
-                  address,
-                  sizeof(address));
+    if (result == 0) {
+
+        if (addr_result->ai_family == AF_INET) {
+            inet_ntop(AF_INET,
+                      &((struct sockaddr_in *)addr_result->ai_addr)->sin_addr,
+                      address,
+                      sizeof(address));
+        }
+        else {
+            inet_ntop(AF_INET6,
+                      &((struct sockaddr_in6 *)addr_result->ai_addr)->sin6_addr,
+                      address,
+                      sizeof(address));
+        }
+        freeaddrinfo(addr_result);
     }
-    else {
-        inet_ntop(AF_INET6,
-                  &((struct sockaddr_in6 *)addr_result->ai_addr)->sin6_addr,
-                  address,
-                  sizeof(address));
-    }
-    freeaddrinfo(addr_result);
+
+
+    gc_exit_blocking();
 
     return alloc_string( address );
 }
