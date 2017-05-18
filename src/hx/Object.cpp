@@ -39,6 +39,13 @@ namespace hx
 
 String sNone[] = { String(null()) };
 
+#if (HXCPP_API_LEVEL>=332)
+bool Object::_hx_isInstanceOf(int inClassId)
+{
+   return inClassId == hx::Object::_hx_ClassId;
+}
+#endif
+
 Dynamic Object::__IField(int inFieldID)
 {
    return __Field( __hxcpp_field_from_id(inFieldID), HX_PROP_DYNAMIC );
@@ -54,7 +61,11 @@ Dynamic *Object::__GetFieldMap() { return 0; }
 
 int Object::__Compare(const Object *inRHS) const
 {
+   #if (HXCPP_API_LEVEL<331)
    hx::Object *real = const_cast<Object *>(this)->__GetRealObject();
+   #else
+   hx::Object *real = const_cast<Object *>(this);
+   #endif
    return real < inRHS ? -1 : real==inRHS ? 0 : 1;
 }
 
@@ -84,7 +95,9 @@ Dynamic Object::__SetItem(int inIndex,Dynamic) { return null();  }
 
 void Object::__SetThis(Dynamic inThis) { }
 
+#if (HXCPP_API_LEVEL<331)
 bool Object::__Is(Dynamic inClass ) const { return __Is(inClass.GetPtr()); }
+#endif
 
 hx::Class Object__mClass;
 
@@ -119,7 +132,7 @@ class Object__scriptable : public hx::Object {
 
 hx::ScriptFunction Object::__script_construct;
 
-static void __s_toString(hx::CppiaCtx *ctx) {
+static void CPPIA_CALL __s_toString(hx::CppiaCtx *ctx) {
    ctx->returnString((ctx->getThis())->toString());
 }
 static hx::ScriptNamedFunction __scriptableFunctions[] = {

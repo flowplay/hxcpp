@@ -48,6 +48,9 @@ class BuildTool
    var mMakefile:String;
    var mMagicLibs:Array<{name:String, replace:String}>;
    var mPragmaOnce:Map<String,Bool>;
+   var mNvccFlags:Array<String>;
+   var mNvccLinkFlags:Array<String>;
+   var mDirtyList:Array<String>;
    var m64:Bool;
    var m32:Bool;
 
@@ -74,7 +77,7 @@ class BuildTool
    public static var threadExitCode = 0;
 
    public function new(inJob:String,inDefines:Hash<String>,inTargets:Array<String>,
-        inIncludePath:Array<String> )
+        inIncludePath:Array<String>, inDirtyList:Array<String> )
    {
       mDefines = inDefines;
       mFileGroups = new FileGroups();
@@ -89,7 +92,10 @@ class BuildTool
       mIncludePath = inIncludePath;
       mPragmaOnce = new Map<String,Bool>();
       mMagicLibs = [];
+      mNvccFlags = [];
+      mNvccLinkFlags = [];
       mMakefile = "";
+      mDirtyList = inDirtyList;
 
       if (inJob=="cache")
       {
@@ -269,7 +275,7 @@ class BuildTool
 
    public function pushFile(inFilename:String, inWhy:String, inSection:String="")
    {
-      Log.info("", " - \x1b[1mParsing " + inWhy + ":\x1b[0m " + inFilename + (inSection == "" ? "" : " (section \"" + inSection + "\")"));
+      Log.info("", " - \x1b[1mParsing " + inWhy + ":\x1b[0m " + inFilename + (inSection == "" ? "" : " \x1b[3m(section \"" + inSection + "\")\x1b[0m"));
       mFileStack.push(inFilename);
    }
 
@@ -382,23 +388,51 @@ class BuildTool
 
          var cached = useCache && mCompiler.createCompilerVersion(group);
 
+         var inList = new Array<Bool>();
+         var groupIsOutOfDate = mDirtyList.indexOf(group.mId)>=0 || mDirtyList.indexOf("all")>=0;
          for(file in group.mFiles)
          {
            if (useCache)
                file.computeDependHash();
             var obj_name = mCompiler.getCachedObjName(file);
             groupObjs.push(obj_name);
-            if (file.isOutOfDate(obj_name))
-            {
+            var outOfDate = groupIsOutOfDate || file.isOutOfDate(obj_name);
+            if (outOfDate)
                to_be_compiled.push(file);
-            }
+            inList.push(outOfDate);
          }
+         var someCompiled = to_be_compiled.length > 0;
 
+         var pchStamp:Null<Float> = null;
          if (group.mPrecompiledHeader!="")
          {
             var obj = mCompiler.precompile(group,cached || to_be_compiled.length==0);
             if (obj!=null)
+            {
+               pchStamp = FileSystem.stat(obj).mtime.getTime();
                groupObjs.push(obj);
+
+               /*
+               for(i in 0...group.mFiles.length)
+               {
+                  var obj_name = groupObjs[i];
+                  if (!inList[i])
+                  {
+                     if (FileSystem.stat(obj_name).mtime.getTime() < pchStamp)
+                     {
+                        groupObjs.push(obj_name);
+                        trace(' Add $obj_name');
+                     }
+                     else
+                        trace(' Ok $obj_name');
+                  }
+                  else
+                  {
+                        trace(' Listed $obj_name  ' + group.mFiles[i].mName);
+                  }
+               }
+               */
+            }
          }
 
          if (group.mConfig!="")
@@ -426,13 +460,20 @@ class BuildTool
             lines.push("#endif");
             lines.push("");
 
-            var filename = mCompiler.mObjDir + "/" + group.mConfig;
-            sys.io.File.saveContent(filename, lines.join("\n") );
+            var filename = mDefines.exists("HXCPP_OUTPUT_CONFIG_NAME") ?
+                           mDefines.get("HXCPP_OUTPUT_CONFIG_NAME") :
+                           PathManager.combine( target.mOutputDir, group.mConfig );
+            if (!PathManager.isAbsolute(filename))
+               filename = PathManager.combine( Sys.getCwd(), filename);
+
+            var content = lines.join("\n");
+            if (!FileSystem.exists(filename) || sys.io.File.getContent(filename)!=content)
+               sys.io.File.saveContent(filename, content);
             addOutput("config",filename);
          }
 
 
-
+         var nvcc = group.mNvcc;
          var first = true;
          var groupHeader = (!Log.quiet && !Log.verbose) ? function()
          {
@@ -442,7 +483,38 @@ class BuildTool
                if (first)
                {
                   first = false;
-                  Log.info(" - Compiling group '" + group.mId + "' with flags " +  group.mCompilerFlags.concat(mCompiler.getFlagStrings()).join(" ") + " tags=" + group.mTags.split(",") );
+                  Log.lock();
+                  Log.println("");
+                  Log.info("\x1b[33;1mCompiling group: " + group.mId + "\x1b[0m");
+                  var message = "\x1b[1m" + (nvcc ? getNvcc() : mCompiler.mExe) + "\x1b[0m";
+                  var flags = group.mCompilerFlags;
+                  if (!nvcc)
+                     flags = flags.concat(mCompiler.getFlagStrings());
+                  else
+                     flags = flags.concat( BuildTool.getNvccFlags() );
+
+                  for (compilerFlag in flags)
+                  {
+                     if (StringTools.startsWith(compilerFlag, "-D"))
+                     {
+                        var index = compilerFlag.indexOf("(");
+                        if (index > -1)
+                        {
+                           message += " \x1b[1m" + compilerFlag.substr(0, index) + "\x1b[0m\x1b[2m" + compilerFlag.substr(index) + "\x1b[0m";
+                        }
+                        else
+                        {
+                           message += " \x1b[1m" + compilerFlag + "\x1b[0m";
+                        }
+                     }
+                     else
+                     {
+                        message += " \x1b[0m" + compilerFlag + "\x1b[0m";
+                     }
+                  }
+                  message += " \x1b[2m...\x1b[0m \x1b[2mtags=" + group.mTags.split(",") + "\x1b[0m";
+                  Log.info(message);
+                  Log.unlock();
                }
                groupMutex.release();
             }
@@ -451,7 +523,7 @@ class BuildTool
          if (threads<2)
          {
             for(file in to_be_compiled)
-               mCompiler.compile(file,-1,groupHeader);
+               mCompiler.compile(file,-1,groupHeader,pchStamp);
          }
          else
          {
@@ -475,8 +547,7 @@ class BuildTool
                      }
                      var file = to_be_compiled.shift();
                      mutex.release();
-
-                     compiler.compile(file,t,groupHeader);
+                     compiler.compile(file,t,groupHeader,pchStamp);
                   }
                   }
                   catch (error:Dynamic)
@@ -518,6 +589,12 @@ class BuildTool
             // Linux the libraries must be added again if the references were not resolved the firs time
             if (group.mAddTwice)
                target.mLibs.push(linker.mLastOutName);
+         }
+         else if (nvcc)
+         {
+            var extraObj = linkNvccFiles(mCompiler.mObjDir, someCompiled, groupObjs, group.mId, mCompiler.mExt);
+            groupObjs.push(extraObj);
+            objs = objs.concat(groupObjs);
          }
          else
          {
@@ -593,6 +670,28 @@ class BuildTool
       if (restoreDir!="")
          Sys.setCwd(restoreDir);
    }
+   
+   function linkNvccFiles(objDir:String, hasChanged:Bool, nvObjs:Array<String>, inGroupName:String, objExt:String)
+   {
+      // nvcc -arch=sm_30 -dlink test1.o test2.o -o link.o
+      // Sadly, nvcc has no 'fromFile' options, so we must do it from objDir
+      var objDirLen = objDir.length;
+      var last = objDir.substr(objDirLen-1);
+      if (last!="/" && last!="\\")
+         objDirLen++;
+      var outFile = "nvcc_" + inGroupName + mCompiler.mExt;
+      var fullFile = objDir + "/" + outFile;
+      if (hasChanged || !sys.FileSystem.exists(fullFile) )
+      {
+         var shortObjs = nvObjs.map( function(f) return f.substr(objDirLen) );
+         var flags = getNvccLinkFlags().concat(shortObjs).concat(["-o",outFile]);
+         var dbgFlags = getNvccLinkFlags().concat(["[.", "x"+shortObjs.length,".]"]).concat(["-o",outFile]);
+         Log.v("Linking nvcc in " + objDir + ":" + getNvcc() + dbgFlags.join(" ") );
+         ProcessManager.runCommand(objDir ,getNvcc(),  flags );
+      }
+      return fullFile;
+   }
+
 
    public function cleanTarget(inTarget:String,allObj:Bool)
    {
@@ -688,6 +787,30 @@ class BuildTool
       return c;
    }
 
+   public function loadNvccXml()
+   {
+      var incName = findIncludeFile("nvcc-setup.xml");
+      if (incName=="")
+         incName = findIncludeFile('$HXCPP/toolchain/nvcc-setup.xml');
+      if (incName=="")
+        Log.error("Could not setup nvcc - missing nvcc-setup.xml");
+      else if (!mPragmaOnce.get(incName))
+      {
+         pushFile(incName, "Nvcc");
+         var make_contents = sys.io.File.getContent(incName);
+         mPragmaOnce.set(incName,true);
+         var xml = Xml.parse(make_contents);
+         parseXML(new Fast(xml.firstElement()),"", false);
+         popFile();
+      }
+   }
+
+   public static function setupNvcc()
+   {
+      instance.loadNvccXml();
+   }
+
+
    public function createFileGroup(inXML:Fast,inFiles:FileGroup,inName:String, inForceRelative:Bool, inTags:String):FileGroup
    {
       var dir = inXML.has.dir ? substitute(inXML.att.dir) : ".";
@@ -744,7 +867,17 @@ class BuildTool
                   substitute(el.att.variable), substitute(el.att.target)  );
                case "options" : group.addOptions( substitute(el.att.name) );
                case "config" : group.mConfig = substitute(el.att.name);
-               case "compilerflag" : group.addCompilerFlag( substitute(el.att.value) );
+               case "compilerflag" :
+                  if (el.has.name)
+                     group.addCompilerFlag( substitute(el.att.name) );
+                  group.addCompilerFlag( substitute(el.att.value) );
+               case "nvcc" :
+                  setupNvcc();
+                  group.mNvcc = true;
+                  if (group.mTags=="haxe,static")
+                     group.mTags=="nvcc";
+               case "objprefix" :
+                  group.mObjPrefix = substitute(el.att.value);
                case "compilervalue" : 
                   group.addCompilerFlag( substitute(el.att.name) );
                   group.addCompilerFlag( substitute(el.att.value) );
@@ -777,7 +910,10 @@ class BuildTool
 
    public function createLinker(inXML:Fast,inBase:Linker):Linker
    {
-      var l = (inBase!=null && !inXML.has.replace) ? inBase : new Linker(substitute(inXML.att.exe));
+      var exe:String = inXML.has.exe ? substitute(inXML.att.exe) : null;
+      if (inBase!=null && !inXML.has.replace && inBase.mExe==null)
+         inBase.mExe = exe;
+      var l = (inBase!=null && !inXML.has.replace) ? inBase : new Linker(exe);
       for(el in inXML.elements)
       {
          if (valid(el,""))
@@ -1098,6 +1234,36 @@ class BuildTool
       return instance.mDefines.get("toolchain")=="mingw";
    }
 
+   public static function getNvcc()
+   {
+      return instance.mDefines.get("NVCC");
+   }
+
+   public static function getNvccLinkFlags() : Array<String>
+   {
+      return instance.mNvccLinkFlags;
+   }
+
+   public static function getNvccFlags() : Array<String>
+   {
+      return instance.mNvccFlags;
+   }
+
+   public static function copy(from:String, to:String)
+   {
+      Log.v('copy $from $to');
+
+      try {
+         if (FileSystem.isDirectory(to))
+            to += "/" + Path.withoutDirectory(from);
+         var bytes = sys.io.File.getBytes(from);
+         sys.io.File.saveBytes(to,bytes);
+      } catch(e:Dynamic)
+      {
+         Log.error('Could not copy file $from $to');
+      }
+   }
+
 
    // Process args and environment.
    static public function main()
@@ -1121,10 +1287,14 @@ class BuildTool
       if (args.length>0)
       {
          var last:String = (new Path(args[args.length-1])).toString();
-         var slash = last.substr(-1);
-         if (slash=="/"|| slash=="\\") 
-            last = last.substr(0,last.length-1);
-         if (FileSystem.exists(last) && FileSystem.isDirectory(last))
+         var isRootDir = last=="/";
+         if (!isRootDir)
+         {
+            var slash = last.substr(-1);
+            if (slash=="/"|| slash=="\\") 
+               last = last.substr(0,last.length-1);
+         }
+         if (isRootDir || (FileSystem.exists(last) && FileSystem.isDirectory(last)))
          {
             // When called from haxelib, the last arg is the original directory, and
             //  the current direcory is the library directory.
@@ -1232,6 +1402,7 @@ class BuildTool
       isRPi = isLinux && Setup.isRaspberryPi();
 
       is64 = getIs64();
+      var dirtyList = new Array<String>();
 
       var a = 0;
       while(a < args.length)
@@ -1267,6 +1438,11 @@ class BuildTool
             optionsTxt = args[a];
             if (optionsTxt==null)
                optionsTxt = "";
+         }
+         else if (arg=="-dirty")
+         {
+            a++;
+            dirtyList.push(args[a]);
          }
          else if (arg=="-v" || arg=="-verbose")
             Log.verbose = true;
@@ -1373,7 +1549,7 @@ class BuildTool
          defines.set("appletv", "appletv");
       }
  
-     
+
 
       if (makefile=="" || Log.verbose)
       {
@@ -1399,7 +1575,7 @@ class BuildTool
             targets.push("default");
 
 
-         new BuildTool(makefile,defines,targets,include_path);
+         new BuildTool(makefile,defines,targets,include_path,dirtyList);
       }
    }
 
@@ -1411,6 +1587,7 @@ class BuildTool
       Log.println('   Build project from "file.xml".  options:');
       Log.println('    ${BOLD}-D${NORMAL}${ITALIC}value${NORMAL} -- Specify a define to use when processing other commands');
       Log.println('    ${BOLD}-verbose${NORMAL} -- Print additional information (when available)');
+      Log.println('    ${BOLD}-dirty [groudId|all]${NORMAL} -- always rebuild files in given group');
       Log.println(' ${BOLD}haxelib run hxcpp${NORMAL} ${ITALIC}${WHITE}file.cppia${NORMAL}');
       Log.println('   Run cppia script using default Cppia host');
       Log.println(' ${BOLD}haxelib run hxcpp${NORMAL} ${ITALIC}${WHITE}file.js${NORMAL}');
@@ -1472,6 +1649,21 @@ class BuildTool
          defines.set("apple","apple");
          defines.set("BINDIR","AppleTV");
       }
+      else if (defines.exists("watchos"))
+      {
+         defines.set("toolchain","watchos");
+         defines.set("apple","apple");
+         defines.set("applewatch","applewatch");
+         defines.set("BINDIR","watchos");
+      }
+      else if (defines.exists("watchsimulator"))
+      {
+         defines.set("toolchain","watchsimulator");
+         defines.set("applewatch","applewatch");
+         defines.set("apple","apple");
+         defines.set("BINDIR","watchsimulator");
+      }
+ 
       else if (defines.exists("android"))
       {
          defines.set("toolchain","android");
@@ -1660,7 +1852,7 @@ class BuildTool
          var dev_path = defines.get("DEVELOPER_DIR") + "/Platforms/iPhoneOS.platform/Developer/SDKs/";
          if (FileSystem.exists(dev_path))
          {
-            var best="";
+            var best="0.0";
             var files = FileSystem.readDirectory(dev_path);
             var extract_version = ~/^iPhoneOS(.*).sdk$/;
             for(file in files)
@@ -1672,7 +1864,7 @@ class BuildTool
                      best = ver;
                }
             }
-            if (best!="")
+            if (best!="0.0")
                defines.set("IPHONE_VER",best);
          }
       }
@@ -1682,7 +1874,7 @@ class BuildTool
          var dev_path = defines.get("DEVELOPER_DIR") + "/Platforms/AppleTVOS.platform/Developer/SDKs/";
          if (FileSystem.exists(dev_path))
          {
-            var best="";
+            var best="0.0";
             var files = FileSystem.readDirectory(dev_path);
             var extract_version = ~/^AppleTVOS(.*).sdk$/;
             for(file in files)
@@ -1694,10 +1886,34 @@ class BuildTool
                      best = ver;
                }
             }
-            if (best!="")
+            if (best!="0.0")
                defines.set("TVOS_VER",best);
          }
       }
+
+
+      if (defines.exists("applewatch") && !defines.exists("WATCHOS_VER"))
+      {
+         var dev_path = defines.get("DEVELOPER_DIR") + "/Platforms/WatchOS.platform/Developer/SDKs/";
+         if (FileSystem.exists(dev_path))
+         {
+            var best="0.0";
+            var files = FileSystem.readDirectory(dev_path);
+            var extract_version = ~/^WatchOS(.*).sdk$/;
+            for(file in files)
+            {
+               if (extract_version.match(file))
+               {
+                  var ver = extract_version.matched(1);
+                  if (Std.parseFloat (ver)>Std.parseFloat (best))
+                     best = ver;
+               }
+            }
+            if (best!="0.0")
+               defines.set("WATCHOS_VER",best);
+         }
+      }
+
       
       if (defines.exists("macos") && !defines.exists("MACOSX_VER"))
       {
@@ -1712,7 +1928,9 @@ class BuildTool
                if (extract_version.match(file))
                {
                   var ver = extract_version.matched(1);
-                  if (Std.parseFloat(ver) > Std.parseFloat(best))
+                  var split_best = best.split(".");
+                  var split_ver = ver.split(".");
+                  if (Std.parseFloat(split_ver[0]) > Std.parseFloat(split_best[0]) || Std.parseFloat(split_ver[1]) > Std.parseFloat(split_best[1]))
                      best = ver;
                }
             }
@@ -1802,6 +2020,24 @@ class BuildTool
                      createTarget(el,mTargets.get(name), forceRelative);
                   else
                      mTargets.set( name, createTarget(el,null, forceRelative) );
+
+               case "mkdir" : 
+                  var name = substitute(el.att.name);
+                  try {
+                     PathManager.mkdir(name);
+                  } catch(e:Dynamic)
+                  {
+                     Log.error("Could not create directory " + name );
+                  }
+
+
+               case "copy" : 
+                   var from = substitute(el.att.from);
+                   from = PathManager.combine( Path.directory(mCurrentIncludeFile), from );
+                   var to = substitute(el.att.to);
+                   to = PathManager.combine( Path.directory(mCurrentIncludeFile), to );
+                   copy(from,to);
+
                case "copyFile" : 
                   mCopyFiles.push(
                       new CopyFile(substitute(el.att.name),
@@ -1818,6 +2054,16 @@ class BuildTool
                case "magiclib" : 
                   mMagicLibs.push( {name: substitute(el.att.name),
                                     replace:substitute(el.att.replace) } );
+               case "nvccflag" : 
+                  if (el.has.name)
+                     mNvccFlags.push( substitute(el.att.name) );
+                  mNvccFlags.push( substitute(el.att.value) );
+
+               case "nvcclinkflag" : 
+                  if (el.has.name)
+                     mNvccLinkFlags.push( substitute(el.att.name) );
+                  mNvccLinkFlags.push( substitute(el.att.value) );
+
                case "pragma" : 
                   if (el.has.once)
                      mPragmaOnce.set(mCurrentIncludeFile, parseBool(substitute(el.att.once)));
@@ -1899,7 +2145,7 @@ class BuildTool
          Sys.setCwd(parts.join("\\"));
          try {
             var bat = '$HXCPP/toolchain/dospath.bat'.split("/").join("\\");
-            var process = new Process(bat,[]);
+            var process = new Process("cmd",["/c",bat]);
             output = process.stdout.readAll().toString();
             output = output.split("\r")[0].split("\n")[0];
             err  = process.stderr.readAll().toString();

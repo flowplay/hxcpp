@@ -22,6 +22,8 @@ class FileGroup
    public var mUseCache:Bool;
    public var mCacheProject:String;
    public var mTags:String;
+   public var mNvcc:Bool;
+   public var mObjPrefix:String;
    
    public function new(inDir:String,inId:String,inSetImportDir = false)
    {
@@ -41,7 +43,9 @@ class FileGroup
       mSetImportDir = inSetImportDir;
       mUseCache = false;
       mCacheProject = "";
+      mNvcc = false;
       mTags = "haxe,static";
+      mObjPrefix = "";
    }
 
    public function filter(defines:Map<String,String>)
@@ -153,7 +157,7 @@ class FileGroup
       var result = new Array<String>();
       for(def in contents.split("\n"))
       {
-         var name = def.split("=")[0].toLowerCase();
+         var name = def.split("=")[0];//.toLowerCase();
          if (name.indexOf("hxcpp_link")>=0)
          {
             // Only effects linking, not compiling

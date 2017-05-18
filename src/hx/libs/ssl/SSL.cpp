@@ -40,11 +40,14 @@ typedef size_t socket_int;
 
 struct SocketWrapper : public hx::Object
 {
+   HX_IS_INSTANCE_OF enum { _hx_ClassId = hx::clsIdSocket };
    SOCKET socket;
 };
 
 struct sslctx : public hx::Object
 {
+   HX_IS_INSTANCE_OF enum { _hx_ClassId = hx::clsIdSsl };
+
 	mbedtls_ssl_context *s;
 
 	void create()
@@ -74,6 +77,8 @@ struct sslctx : public hx::Object
 
 struct sslconf : public hx::Object
 {
+   HX_IS_INSTANCE_OF enum { _hx_ClassId = hx::clsIdSslConf };
+
 	mbedtls_ssl_config *c;
 
 	void create()
@@ -103,6 +108,8 @@ struct sslconf : public hx::Object
 
 struct sslcert : public hx::Object
 {
+   HX_IS_INSTANCE_OF enum { _hx_ClassId = hx::clsIdSslCert };
+
 	mbedtls_x509_crt *c;
 	bool head;
 
@@ -141,6 +148,8 @@ struct sslcert : public hx::Object
 
 struct sslpkey : public hx::Object
 {
+   HX_IS_INSTANCE_OF enum { _hx_ClassId = hx::clsIdSslKey };
+
 	mbedtls_pk_context *k;
 
 	void create()
@@ -569,10 +578,10 @@ Array<String> _hx_ssl_cert_get_altnames( Dynamic hcert ){
 	return result;
 }
 
-static Array<Int> x509_time_to_array( mbedtls_x509_time *t ){
+static Array<int> x509_time_to_array( mbedtls_x509_time *t ){
 	if( !t )
 		hx::Throw( HX_CSTRING("x509_time_to_array") );
-	Array<Int> result(6,6);
+	Array<int> result(6,6);
 	result[0] = t->year;
 	result[1] = t->mon;
 	result[2] = t->day;
@@ -582,14 +591,14 @@ static Array<Int> x509_time_to_array( mbedtls_x509_time *t ){
 	return result;
 }
 
-Array<Int> _hx_ssl_cert_get_notbefore( Dynamic hcert ){
+Array<int> _hx_ssl_cert_get_notbefore( Dynamic hcert ){
 	sslcert *cert = val_cert(hcert);
 	if( !cert->c )
 		hx::Throw( HX_CSTRING("cert_get_notbefore") );
 	return x509_time_to_array( &cert->c->valid_from );
 }
 
-Array<Int> _hx_ssl_cert_get_notafter( Dynamic hcert ){
+Array<int> _hx_ssl_cert_get_notafter( Dynamic hcert ){
 	sslcert *cert = val_cert(hcert);
 	if( !cert->c )
 		hx::Throw( HX_CSTRING("cert_get_notafter") );
@@ -737,7 +746,7 @@ bool _hx_ssl_dgst_verify( Array<unsigned char> buf, Array<unsigned char> sign, D
 	return true;
 }
 
-#if _MSC_VER
+#if (_MSC_VER || defined(WIN32))
 
 static void threading_mutex_init_alt( mbedtls_threading_mutex_t *mutex ){
 	if( mutex == NULL )
@@ -776,7 +785,7 @@ void _hx_ssl_init() {
     if (_hx_ssl_inited) return;
     _hx_ssl_inited = true;
 
-#if _MSC_VER
+#if (_MSC_VER || defined(WIN32))
 	mbedtls_threading_set_alt( threading_mutex_init_alt, threading_mutex_free_alt,
                            threading_mutex_lock_alt, threading_mutex_unlock_alt );
 #endif

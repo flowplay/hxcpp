@@ -168,6 +168,8 @@ Dynamic __hxcpp_deque_pop(Dynamic q,bool block)
 class hxThreadInfo : public hx::Object
 {
 public:
+   HX_IS_INSTANCE_OF enum { _hx_ClassId = hx::clsIdThreadInfo };
+
 	hxThreadInfo(Dynamic inFunction, int inThreadNumber)
         : mFunction(inFunction), mThreadNumber(inThreadNumber), mTLS(0,0)
 	{
@@ -237,15 +239,15 @@ THREAD_FUNC_TYPE hxThreadFunc( void *inInfo )
    info[0] = (hxThreadInfo *)inInfo;
    info[1] = 0;
 
-	hx::SetTopOfStack((int *)&info[1], true);
-
 	tlsCurrentThread = info[0];
+
+	hx::SetTopOfStack((int *)&info[1], true);
 
 	// Release the creation function
 	info[0]->mSemaphore->Set();
 
     // Call the debugger function to annouce that a thread has been created
-    __hxcpp_dbg_threadCreatedOrTerminated(info[0]->GetThreadNumber(), true);
+    //__hxcpp_dbg_threadCreatedOrTerminated(info[0]->GetThreadNumber(), true);
 
 	if ( info[0]->mFunction.GetPtr() )
 	{
@@ -254,7 +256,7 @@ THREAD_FUNC_TYPE hxThreadFunc( void *inInfo )
 	}
 
     // Call the debugger function to annouce that a thread has terminated
-    __hxcpp_dbg_threadCreatedOrTerminated(info[0]->GetThreadNumber(), false);
+    //__hxcpp_dbg_threadCreatedOrTerminated(info[0]->GetThreadNumber(), false);
 
 	hx::UnregisterCurrentThread();
 
@@ -361,6 +363,8 @@ public:
 		mFinalizer->mFinalizer = clean;
 	}
 
+   HX_IS_INSTANCE_OF enum { _hx_ClassId = hx::clsIdMutex };
+
 	void __Mark(hx::MarkContext *__inCtx) { mFinalizer->Mark(); }
 
    #ifdef HXCPP_VISIT_ALLOCS
@@ -437,6 +441,8 @@ public:
 		mFinalizer = new hx::InternalFinalizer(this);
 		mFinalizer->mFinalizer = clean;
 	}
+
+   HX_IS_INSTANCE_OF enum { _hx_ClassId = hx::clsIdLock };
 
 	void __Mark(hx::MarkContext *__inCtx) { mFinalizer->Mark(); }
 

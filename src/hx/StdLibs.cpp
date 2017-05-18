@@ -37,6 +37,10 @@ extern "C" EXPORT_EXTRA void AppLogInternal(const char* pFunction, int lineNumbe
 #endif
 
 void __hx_stack_set_last_exception();
+void __hx_stack_push_last_exception();
+
+int _hxcpp_argc = 0;
+char **_hxcpp_argv = 0;
 
 namespace hx
 {
@@ -49,6 +53,17 @@ Dynamic Throw(Dynamic inDynamic)
    throw inDynamic;
    return null();
 }
+
+
+Dynamic Rethrow(Dynamic inDynamic)
+{
+   #ifdef HXCPP_STACK_TRACE
+   __hx_stack_push_last_exception();
+   #endif
+   throw inDynamic;
+   return null();
+}
+
 
 null NullArithmetic(const HX_CHAR *inErr)
 {
@@ -459,7 +474,7 @@ LEADINGWHITE:
 
 
 #ifdef __APPLE__
- #if !defined(IPHONE) && !defined(APPLETV)
+ #if !defined(IPHONE) && !defined(APPLETV) && !defined(HX_APPLEWATCH)
    extern "C" {
    extern int *_NSGetArgc(void);
    extern char ***_NSGetArgv(void);
@@ -469,6 +484,12 @@ LEADINGWHITE:
 Array<String> __get_args()
 {
    Array<String> result(0,0);
+   if (_hxcpp_argc)
+   {
+      for(int i=1;i<_hxcpp_argc;i++)
+         result->push( String(_hxcpp_argv[i],strlen(_hxcpp_argv[i])).dup() );
+      return result;
+   }
 
    #ifdef HX_WINRT
    // Do nothing
@@ -478,7 +499,7 @@ Array<String> __get_args()
    #else
    #ifdef __APPLE__
 
-   #if !defined(IPHONE) && !defined(APPLETV)
+   #if !defined(IPHONE) && !defined(APPLETV) && !defined(HX_APPLEWATCH)
    int argc = *_NSGetArgc();
    char **argv = *_NSGetArgv();
    for(int i=1;i<argc;i++)
@@ -634,6 +655,8 @@ namespace hx
 
 struct VarArgFunc : public hx::Object
 {
+   HX_IS_INSTANCE_OF enum { _hx_ClassId = hx::clsIdClosure };
+
    VarArgFunc(Dynamic &inFunc) : mRealFunc(inFunc) { }
 
    int __GetType() const { return vtFunction; }

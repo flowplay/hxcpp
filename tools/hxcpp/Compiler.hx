@@ -13,7 +13,8 @@ private class FlagInfo
    }
    public function add(args:Array<String>, inFilter:Array<String>)
    {
-      if (tag=="" || inFilter.indexOf(tag)>=0)
+      var allowSpace = inFilter.indexOf("nvcc")<0;
+      if ((tag==""&&allowSpace) || inFilter.indexOf(tag)>=0)
          args.push(flag);
    }
    public function toString():String
@@ -29,6 +30,7 @@ class Compiler
 {
    private var mFlags:Array<FlagInfo>;
    public var mCFlags:Array<String>;
+   public var mNvccFlags:Array<String>;
    public var mMMFlags:Array<String>;
    public var mCPPFlags:Array<String>;
    public var mOBJCFlags:Array<String>;
@@ -60,6 +62,7 @@ class Compiler
    {
       mFlags = [];
       mCFlags = [];
+      mNvccFlags = [];
       mCPPFlags = [];
       mOBJCFlags = [];
       mMMFlags = [];
@@ -161,18 +164,27 @@ class Compiler
 
    function getArgs(inFile:File)
    {
-      var args = inFile.mCompilerFlags.concat(inFile.mGroup.mCompilerFlags);
+      var nvcc = inFile.isNvcc();
+      var args = nvcc ? inFile.mGroup.mCompilerFlags.concat( BuildTool.getNvccFlags() ) :
+                       inFile.mCompilerFlags.concat(inFile.mGroup.mCompilerFlags);
       var tagFilter = inFile.getTags().split(",");
       addOptimTags(tagFilter);
       for(flag in mFlags)
          flag.add(args,tagFilter);
-
       var ext = mExt.toLowerCase();
-      var ext = new Path(inFile.mName).ext.toLowerCase();
+      var ext = new Path(inFile.mName).ext;
+      if (ext!=null)
+         ext = ext.toLowerCase();
+      else
+         Log.error("Unkown extension for " + inFile.mName);
+
+
       addIdentity(ext,args);
 
       var allowPch = false;
-      if (ext=="c")
+      if (nvcc)
+         args = args.concat(mNvccFlags);
+      else if (ext=="c")
          args = args.concat(mCFlags);
       else if (ext=="m")
          args = args.concat(mOBJCFlags);
@@ -202,10 +214,12 @@ class Compiler
       return args;
    }
 
-   public function compile(inFile:File,inTid:Int,headerFunc:Void->Void)
+   public function compile(inFile:File,inTid:Int,headerFunc:Void->Void,pchTimeStamp:Null<Float>)
    {
       var obj_name = getObjName(inFile);
       var args = getArgs(inFile);
+      var nvcc = inFile.isNvcc();
+      var exe = nvcc ? BuildTool.getNvcc() : mExe;
 
       var found = false;
       var cacheName:String = null;
@@ -220,10 +234,19 @@ class Compiler
 
          if (FileSystem.exists(cacheName))
          {
-            //Log.info(""," copy cache for " + obj_name );
-            if (!useCacheInPlace)
-               sys.io.File.copy(cacheName, obj_name);
-            found = true;
+            var newer = true;
+            if (pchTimeStamp!=null)
+            {
+               var time = FileSystem.stat(cacheName).mtime.getTime();
+               newer = time>=pchTimeStamp;
+            }
+            if (newer)
+            {
+               //Log.info(""," copy cache for " + obj_name );
+               if (!useCacheInPlace)
+                  sys.io.File.copy(cacheName, obj_name);
+               found = true;
+            }
          }
       }
 
@@ -233,7 +256,7 @@ class Compiler
             headerFunc();
          args.push( (new Path( inFile.mDir + inFile.mName)).toString() );
 
-         var out = mOutFlag;
+         var out = nvcc ? "-o " : mOutFlag;
          if (out.substr(-1)==" ")
          {
             args.push(out.substr(0,out.length-1));
@@ -243,18 +266,40 @@ class Compiler
          args.push(out + obj_name);
 
          var tagInfo = inFile.mTags==null ? "" : " " + inFile.mTags.split(",");
+         
+         var fileName = inFile.mName;
+         var split = fileName.split ("/");
+         if (split.length > 1)
+         {
+            fileName = " \x1b[2m-\x1b[0m \x1b[33m" + split.slice(0, split.length - 1).join("/") + "/\x1b[33;1m" + split[split.length - 1] + "\x1b[0m";
+         }
+         else
+         {
+            fileName = " \x1b[2m-\x1b[0m \x1b[33;1m" + fileName + "\x1b[0m";
+         }
+         fileName += " \x1b[3m" + tagInfo + "\x1b[0m";
+
+         
          if (inTid >= 0)
          {
             if (BuildTool.threadExitCode == 0)
             {
-               var err = ProcessManager.runProcessThreaded(mExe, args, " - \x1b[1mCompile :\x1b[0m " + inFile.mName + tagInfo);
+               if (!Log.verbose)
+               {
+                  Log.info(fileName);
+               }
+               var err = ProcessManager.runProcessThreaded(exe, args, null);
                if (err!=0)
                   BuildTool.setThreadError(err);
             }
          }
          else
          {
-            var result = ProcessManager.runProcessThreaded(mExe, args, " - \x1b[1mCompile:\x1b[0m " + inFile.mName + tagInfo);
+            if (!Log.verbose)
+            {
+               Log.info(fileName);
+            }
+            var result = ProcessManager.runProcessThreaded(exe, args, null);
             if (result!=0)
             {
                if (FileSystem.exists(obj_name))
@@ -309,7 +354,7 @@ class Compiler
       var path = new Path(inFile.mName);
       var dirId = Md5.encode(BuildTool.targetKey + path.dir + inFile.mGroup.mId).substr(0,8) + "_";
 
-      return PathManager.combine(mObjDir, dirId + path.file + mExt);
+      return PathManager.combine(mObjDir, inFile.mGroup.mObjPrefix + dirId + path.file + mExt);
    }
 
    function getHashedName(inFile:File, args:Array<String>)
@@ -431,8 +476,21 @@ class Compiler
       var result = ProcessManager.runCommand("", mExe, args);
       if (result!=0)
       {
-         if (FileSystem.exists(pch_name))
-            FileSystem.deleteFile(pch_name);
+         var goes = 10;
+         for(attempt in 0...goes)
+         {
+            try {
+               if (FileSystem.exists(pch_name))
+                  FileSystem.deleteFile(pch_name);
+               break;
+            }
+            catch(error:Dynamic)
+            {
+               Log.warn('Error cleaning PCH file $pch_name: $error');
+               if (attempt<goes-1)
+                  Sys.sleep(0.25);
+            }
+         }
          Log.error("Could not create PCH");
          //throw "Error creating pch: " + result + " - build cancelled";
       }

@@ -10,13 +10,7 @@
 
 #define HX_GC_CONST_ALLOC_BIT  0x80000000
 #define HX_GC_CONST_ALLOC_MARK_BIT  0x80
-#define HX_GC_NO_STRING_HASH   0x40000000
-#define HX_GC_NO_HASH_MASK     (HX_GC_CONST_ALLOC_BIT | HX_GC_NO_STRING_HASH)
 
-// Must allign allocs to 8 bytes to match floating point requirement?
-#ifdef HXCPP_ALIGN_FLOAT
-   #define HXCPP_ALIGN_ALLOC
-#endif
 
 
 
@@ -24,6 +18,10 @@
 #define HXCPP_GC_FUNCTIONS_1
 
 // Function called by the haxe code...
+
+#ifdef HXCPP_TELEMETRY
+extern void __hxt_gc_new(hx::StackContext *inStack, void* obj, int inSize, const char *inName);
+#endif
 
 
 // Helpers for debugging code
@@ -56,6 +54,13 @@ inline void _hx_add_finalizable( hx::ObjectPtr<T> inObj, bool inPin)
   _hx_member_finalizer finalizer = (_hx_member_finalizer)&T::finalize;
   __hxcpp_add_member_finalizer(inObj.mPtr, finalizer, inPin);
 }
+template<typename T>
+inline void _hx_add_finalizable( T *inObj, bool inPin)
+{
+  _hx_member_finalizer finalizer = (_hx_member_finalizer)&T::finalize;
+  __hxcpp_add_member_finalizer(inObj, finalizer, inPin);
+}
+
 
 
 template<typename T>
@@ -164,6 +169,7 @@ void PauseForCollect();
 
 // Used by WeakHash to work out if it needs to dispose its keys
 bool IsWeakRefValid(hx::Object *inPtr);
+bool IsWeakRefValid(const HX_CHAR *inPtr);
 
 // Used by CFFI to scan a block of memory for GC Pointers. May picks up random crap
 //  that points to real, active objects.
@@ -266,7 +272,6 @@ void GCPrepareMultiThreaded();
 } // end namespace hx
 
 
-
 // Inline code tied to the immix implementation
 
 namespace hx
@@ -274,18 +279,58 @@ namespace hx
 
 #define HX_USE_INLINE_IMMIX_OPERATOR_NEW
 
+//#define HX_STACK_CTX ::hx::ImmixAllocator *_hx_stack_ctx =  hx::gMultiThreadMode ? hx::tlsImmixAllocator : hx::gMainThreadAlloc;
+
+
 // Each line ast 128 bytes (2^7)
 #define IMMIX_LINE_BITS    7
 #define IMMIX_LINE_LEN     (1<<IMMIX_LINE_BITS)
 
 // The size info is stored in the header 8 bits to the right
-#define IMMIX_ALLOC_SIZE_SHIFT  8
+#define IMMIX_ALLOC_SIZE_SHIFT  6
 
 // Indicates that __Mark must be called recursively
 #define IMMIX_ALLOC_IS_CONTAINER   0x00800000
+// String has extra data at end
+#define HX_GC_STRING_EXTENDED      0x00200000
+// String has hash data at end
+#define HX_GC_STRING_HASH          0x00100000
 
+#define HX_GC_STRING_HASH_BIT      0x10
+
+#ifdef HXCPP_BIG_ENDIAN
+   #define HX_GC_STRING_HASH_OFFSET -3
+   #define HX_GC_CONST_ALLOC_MARK_OFFSET -4
+#else
+   #define HX_GC_STRING_HASH_OFFSET -2
+   #define HX_GC_CONST_ALLOC_MARK_OFFSET -1
+#endif
 
 extern bool gMultiThreadMode;
+
+
+
+// The gPauseForCollect bits will turn spaceEnd negative, and so force the slow path
+#ifndef HXCPP_SINGLE_THREADED_APP
+   #define WITH_PAUSE_FOR_COLLECT_FLAG | hx::gPauseForCollect
+#else
+   #define WITH_PAUSE_FOR_COLLECT_FLAG
+#endif
+
+
+
+class StackContext;
+
+EXTERN_FAST_TLS_DATA(StackContext, tlsStackContext);
+
+extern StackContext *gMainThreadContext;
+
+extern unsigned int gImmixStartFlag[128];
+extern int gMarkID;
+extern int gMarkIDWithContainer;
+extern void BadImmixAlloc();
+
+
 
 
 class ImmixAllocator
@@ -299,24 +344,73 @@ public:
    int            spaceEnd;
    unsigned int   *allocStartFlags;
    unsigned char  *allocBase;
+
+
+
+   // These allocate the function using the garbage-colleced malloc
+   inline static void *alloc(ImmixAllocator *alloc, size_t inSize, bool inContainer, const char *inName )
+   {
+      #ifndef HXCPP_ALIGN_ALLOC
+         // Inline the fast-path if we can
+         // We know the object can hold a pointer (vtable) and that the size is int-aligned
+
+         int start = alloc->spaceStart;
+         int end = start + sizeof(int) + inSize;
+
+         if ( end <= alloc->spaceEnd )
+         {
+            alloc->spaceStart = end;
+
+            unsigned int *buffer = (unsigned int *)(alloc->allocBase + start);
+
+            #ifdef HXCPP_GC_NURSERY
+            if (inContainer)
+               *buffer++ = inSize | IMMIX_ALLOC_IS_CONTAINER;
+            else
+               *buffer++ = inSize;
+            #else
+            int startRow = start>>IMMIX_LINE_BITS;
+
+            alloc->allocStartFlags[ startRow ] |= gImmixStartFlag[start&127];
+            //alloc->allocBase[ startRow ] |= (1<<( (start>>2) & 31) );
+
+
+            if (inContainer)
+               *buffer++ =  (( (end+(IMMIX_LINE_LEN-1))>>IMMIX_LINE_BITS) -startRow) |
+                            (inSize<<IMMIX_ALLOC_SIZE_SHIFT) |
+                            hx::gMarkIDWithContainer;
+            else
+               *buffer++ =  (( (end+(IMMIX_LINE_LEN-1))>>IMMIX_LINE_BITS) -startRow) |
+                            (inSize<<IMMIX_ALLOC_SIZE_SHIFT) |
+                            hx::gMarkID;
+            #endif
+
+            #if defined(HXCPP_GC_CHECK_POINTER) && defined(HXCPP_GC_DEBUG_ALWAYS_MOVE)
+            hx::GCOnNewPointer(buffer);
+            #endif
+
+            #ifdef HXCPP_TELEMETRY
+            __hxt_gc_new((hx::StackContext *)alloc,buffer, inSize, inName);
+            #endif
+            return buffer;
+         }
+      #endif // HXCPP_ALIGN_ALLOC
+
+      // Fall back to external method
+      void *result = alloc->CallAlloc(inSize, inContainer ? IMMIX_ALLOC_IS_CONTAINER : 0);
+
+      #ifdef HXCPP_TELEMETRY
+         __hxt_gc_new((hx::StackContext *)alloc,result, inSize, inName);
+      #endif
+      return result;
+   }
 };
 
-EXTERN_FAST_TLS_DATA(ImmixAllocator, tlsImmixAllocator);
+typedef ImmixAllocator GcAllocator;
+typedef ImmixAllocator Ctx;
 
-extern ImmixAllocator *gMainThreadAlloc;
-extern unsigned int gImmixStartFlag[128];
-extern int gMarkID;
-extern int gMarkIDWithContainer;
-extern void BadImmixAlloc();
-
-
-// The gPauseForCollect bits will turn spaceEnd negative, and so force the slow path
-#ifndef HXCPP_SINGLE_THREADED_APP
-   #define WITH_PAUSE_FOR_COLLECT_FLAG | hx::gPauseForCollect
-#else
-   #define WITH_PAUSE_FOR_COLLECT_FLAG
-#endif
-
+#define HX_OBJ_WB(obj,value)
+#define HX_ARRAY_WB(array,index,value)
 
 
 HXCPP_EXTERN_CLASS_ATTRIBUTES extern unsigned int gPrevMarkIdMask;
@@ -327,12 +421,20 @@ HXCPP_EXTERN_CLASS_ATTRIBUTES void MarkObjectAllocUnchecked(hx::Object *inPtr ,h
 
 inline void MarkAlloc(void *inPtr ,hx::MarkContext *__inCtx)
 {
+   #ifdef EMSCRIPTEN
+   // Unaligned must be constants...
+   if ( !( ((size_t)inPtr) & 3) )
+   #endif
    // This will also skip const regions
    if ( !(((unsigned int *)inPtr)[-1] & hx::gPrevMarkIdMask) )
       MarkAllocUnchecked(inPtr,__inCtx);
 }
 inline void MarkObjectAlloc(hx::Object *inPtr ,hx::MarkContext *__inCtx)
 {
+   #ifdef EMSCRIPTEN
+   // Unaligned must be constants...
+   if ( !( ((size_t)inPtr) & 3) )
+   #endif
    // This will also skip const regions
    if ( !(((unsigned int *)inPtr)[-1] & hx::gPrevMarkIdMask) )
       MarkObjectAllocUnchecked(inPtr,__inCtx);
@@ -340,15 +442,6 @@ inline void MarkObjectAlloc(hx::Object *inPtr ,hx::MarkContext *__inCtx)
 
 
 } // end namespace hx
-
-
-
-
-
-
-
-
-
 
 
 
@@ -416,7 +509,7 @@ inline void MarkObjectAlloc(hx::Object *inPtr ,hx::MarkContext *__inCtx)
   { if (ioPtr) __inCtx->visitObject( (hx::Object **)&ioPtr); }
 
 #define HX_VISIT_STRING(ioPtr) \
-   if (ioPtr && !(((unsigned int *)ioPtr)[-1] & HX_GC_CONST_ALLOC_BIT) ) __inCtx->visitAlloc((void **)&ioPtr);
+   if (ioPtr && !(((unsigned int *)ioPtr)[HX_GC_CONST_ALLOC_MARK_OFFSET] & HX_GC_CONST_ALLOC_MARK_BIT) ) __inCtx->visitAlloc((void **)&ioPtr);
 
 #define HX_VISIT_ARRAY(ioPtr) { if (ioPtr) __inCtx->visitAlloc((void **)&ioPtr); }
 

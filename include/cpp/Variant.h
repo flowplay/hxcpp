@@ -89,6 +89,8 @@ namespace cpp
       explicit inline Variant(const cpp::Struct<T,H> &inVal);
       template<typename T>
       explicit inline Variant(const cpp::Pointer<T> &inRHS) ;
+      template<typename T>
+      explicit inline Variant(const cpp::Function<T> &inRHS) ;
 
       //inline operator Dynamic() const; // later
       //inline operator String() const;
@@ -235,8 +237,14 @@ namespace cpp
 
 
    #if defined(__OBJC__) && defined(HXCPP_OBJC)
+   // Variant type neither adds nor releases references counts while holding the value as an id on the stack
+   // The Dynamic created here owns the id, and we refer to the Dynamic and use his reference count to keep the id alive
    inline Variant::Variant(const id inObjc) { type=typeObject; valObject = Dynamic(inObjc).mPtr; }
-   inline Variant::operator id () const {  return type==typeObject && valObject ? (id)valObject->__GetHandle() : 0;  }
+   #ifdef OBJC_ARC
+      inline Variant::operator id () const {  return type==typeObject && valObject ? (__bridge id)valObject->__GetHandle() : 0;  }
+   #else
+      inline Variant::operator id () const {  return type==typeObject && valObject ? (id)valObject->__GetHandle() : 0;  }
+   #endif
    #endif
 
 
@@ -252,6 +260,9 @@ namespace cpp
 
    template<typename T>
    Variant::Variant(const cpp::Pointer<T> &inRHS) : type(typeObject), valObject( Dynamic(inRHS).mPtr ) { }
+   template<typename T>
+   Variant::Variant(const cpp::Function<T> &inRHS) : type(typeObject), valObject( Dynamic(inRHS).mPtr ) { }
+
 
 #define HX_ARITH_VARIANT( op ) \
    inline double operator op (const double &inLHS,const cpp::Variant &inRHS) { return inLHS op (double)inRHS;} \
@@ -306,7 +317,7 @@ namespace cpp
       switch(type)
       {
          case typeDouble: return valDouble;
-         case typeInt64: return valInt64;
+         case typeInt64: return (int)valInt64;
          case typeBool: return valBool;
          case typeObject: return valObject ? valObject->__ToInt() : 0;
          default: ;
@@ -481,7 +492,11 @@ namespace cpp
                return 1;
             return String(valStringPtr, valStringLen)==inPtr->toString() ? 1 : 0;
          case typeObject:
-               return valObject->__Compare( inPtr->__GetRealObject() );
+            #if (HXCPP_API_LEVEL>=331)
+            return valObject->__Compare( inPtr );
+            #else
+            return valObject->__Compare( inPtr->__GetRealObject() );
+            #endif
          default: ;
 
       }

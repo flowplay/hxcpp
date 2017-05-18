@@ -40,6 +40,10 @@ public:
    {
       *this = String([inString UTF8String]);
    }
+   inline operator NSString * () const
+   {
+      return [[NSString alloc] initWithUTF8String:__s];
+   }
    #endif
    #if defined(HX_WINRT) && defined(__cplusplus_winrt)
    inline String(Platform::String^ inString)
@@ -138,24 +142,39 @@ public:
    inline unsigned int hash( ) const
    {
       if (!__s) return 0;
-      if ( (((unsigned int *)__s)[-1] & HX_GC_NO_HASH_MASK) == HX_GC_CONST_ALLOC_BIT)
+      if ( __s[HX_GC_STRING_HASH_OFFSET] & HX_GC_STRING_HASH_BIT)
       {
          #ifdef HXCPP_PARANOID
          unsigned int result = 0;
          for(int i=0;i<length;i++)
             result = result*223 + ((unsigned char *)__s)[i];
 
-         if  ( ((unsigned int *)__s)[-2] != result )
+         unsigned int have = (((unsigned int *)__s)[-1] & HX_GC_CONST_ALLOC_BIT) ?
+                ((unsigned int *)__s)[-2] :  *((unsigned int *)(__s+length+1) );
+
+         if ( have != result )
          {
              printf("Bad string hash for %s\n", __s );
              printf(" Is %08x\n", result );
-             printf(" Baked %08x\n",  ((unsigned int *)__s)[-2]  );
-             printf(" Mark %08x\n",    ((unsigned int *)__s)[-1]  );
-             throw Dynamic(HX_CSTRING("Bad Hash!"));
+             printf(" Baked %08x\n", have );
+             printf(" Mark %08x\n",   ((unsigned int *)__s)[-1]  );
          }
          #endif
-         return ((unsigned int *)__s)[-2];
+         if (__s[HX_GC_CONST_ALLOC_MARK_OFFSET] & HX_GC_CONST_ALLOC_MARK_BIT)
+         {
+            #ifdef EMSCRIPTEN
+            return  ((emscripten_align1_int*)__s)[-2];
+            #else
+            return  ((unsigned int *)__s)[-2];
+            #endif
+         }
+        #ifdef EMSCRIPTEN
+           return *((emscripten_align1_int *)(__s+length+1) );
+        #else
+           return *((unsigned int *)(__s+length+1) );
+        #endif
       }
+
       // Slow path..
       return calcHash();
    }
@@ -182,8 +201,8 @@ public:
    }
 
 
-   ::String &operator+=(::String inRHS);
-   ::String operator+(::String inRHS) const;
+   ::String &operator+=(const ::String &inRHS);
+   ::String operator+(const ::String &inRHS) const;
    ::String operator+(const int &inRHS) const { return *this + ::String(inRHS); }
    ::String operator+(const bool &inRHS) const { return *this + ::String(inRHS); }
    ::String operator+(const double &inRHS) const { return *this + ::String(inRHS); }

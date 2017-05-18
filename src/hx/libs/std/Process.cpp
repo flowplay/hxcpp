@@ -40,6 +40,8 @@ static int do_close( int fd )
 
 struct vprocess : public hx::Object
 {
+  HX_IS_INSTANCE_OF enum { _hx_ClassId = hx::clsIdProcess };
+
    bool open;
 #ifdef NEKO_WINDOWS
    HANDLE oread;
@@ -132,7 +134,7 @@ vprocess *getProcess(Dynamic handle)
 **/
 Dynamic _hx_std_process_run( String cmd, Array<String> vargs, int inShowParam )
 {
-   #ifdef APPLETV
+   #if defined(APPLETV) || defined(HX_APPLEWATCH)
    return null();
 
    #else
@@ -314,7 +316,7 @@ Dynamic _hx_std_process_run( String cmd, Array<String> vargs, int inShowParam )
 
    return p;
 
-   #endif // not APPLETV
+   #endif // not APPLETV/HX_APPLEWATCH
 }
 
 

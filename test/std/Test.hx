@@ -42,6 +42,14 @@ extern class SslTest
 class Test
 {
    static var errors = new Array<String>();
+   static var lastErrorCount = 0;
+
+   var x:Int;
+
+   public function new()
+   {
+      x = 1;
+   }
 
    public static function log(t:String)
    {
@@ -55,8 +63,17 @@ class Test
 
    public static function ok()
    {
-      v("ok");
-      return 0;
+      if (lastErrorCount==errors.length)
+      {
+         v("ok");
+         return 0;
+      }
+      else
+      {
+         lastErrorCount=errors.length;
+         v("bad");
+         return 1;
+      }
    }
 
    public static function error(e:String)
@@ -499,7 +516,7 @@ class Test
 
    public static function testCommand()
    {
-      log("Test Sys");
+      log("Test Command");
       try
       {
       var code = Sys.command( Sys.programPath(), ["exit", "13"]);
@@ -519,7 +536,9 @@ class Test
       var args = Sys.args();
       var job = args.shift();
       if (job=="exit")
+      {
          Sys.exit( Std.parseInt(args[0]) );
+      }
       else if (job=="socket")
       {
          socketClient();
@@ -698,9 +717,22 @@ class Test
 
    public static function testSsl() : Int
    {
+      log("Test ssl");
       SslTest.socket_init();
-      return 0;
+      return ok();
    }
+
+   public static function testSerialization() : Int
+   {
+      log("Test serialization");
+      var orig:haxe.Int64 = haxe.Int64.make(0xdeadbeef,0xbeefdead);
+      var recon:haxe.Int64 = haxe.Unserializer.run(haxe.Serializer.run(orig));
+      if (orig!=recon)
+         error('Bad Int64 serialization $orig != $recon');
+
+      return ok();
+   }
+
 
    // Hide from optimizer
    static function getOne() return 1;
@@ -728,23 +760,97 @@ class Test
          error("Bad atomicDec value " + a);
 
 
-      v("deque...");
-      a = 0;
+      a = getOne();
+      v('deque a=$a');
 
       var q = new Deque<Int>();
       q.add(1);
       q.add(2);
       q.add(3);
-      Thread.create(function() { q.pop(true); aPtr.atomicInc(); });
-      Thread.create(function() { q.pop(true);  aPtr.atomicInc(); } );
-      Thread.create(function() { q.pop(true);  aPtr.atomicDec(); } );
+      var mainThread = Thread.current();
+      // +100000
+      Thread.create(function() {
+         q.pop(true);
+         for(i in 0...100000)
+            aPtr.atomicInc();
+         mainThread.sendMessage(null);
+      });
+      // +100000
+      Thread.create(function() {
+         q.pop(true);
+         for(i in 0...100000)
+            aPtr.atomicInc();
+         mainThread.sendMessage(null);
+      } );
+      // -200000
+      Thread.create(function() {
+         q.pop(true);
+         for(i in 0...200000)
+            aPtr.atomicDec();
+         mainThread.sendMessage(null);
+      } );
+
+      v("wait for reply..");
+      for(i in 0...3)
+      {
+         Thread.readMessage(true);
+         v('got $i');
+      }
 
       if (a!=1)
-         error("Bad deque count");
+         error('Bad deque count : $a');
 
       return ok();
    }
 
+   public static function testFloatReads()
+   {
+      log("Test float bytes");
+
+      var bytes =haxe.io.Bytes.alloc(1+4+8);
+      bytes.fill(0,1,46);
+
+      // Test unaligned read/write
+      bytes.setFloat(1,1.25);
+      bytes.setDouble(5,1.25);
+
+      if (bytes.get(0)!=46)
+         error("Bad byte 0");
+
+      if (bytes.getDouble(5)!=bytes.getFloat(1))
+         error("Bad byte read/write");
+
+      return ok();
+   }
+
+   public dynamic function getX() return x;
+
+   public static function testDynamicMember()
+   {
+      log("Test dynamic member");
+      var t = new Test();
+      if (t.getX()!=1)
+         error("Bad dynamic member function");
+      return ok();
+   }
+
+
+   @:noDebug
+   public static function testNoDebug()
+   {
+      log("Test noDebug");
+      // Just testing to see it it compiles...
+      if (  null == new haxe.io.BytesBuffer() )
+         error("Bad alloc");
+      return ok();
+   }
+
+   @:noDebug
+   public static function testNoDebugNoAlloc()
+   {
+      log("Test noDebug, no alloc");
+      return ok();
+   }
 
 
    public static function main()
@@ -772,6 +878,11 @@ class Test
          exitCode |= testSocket();
          exitCode |= testThread();
          exitCode |= testSsl();
+         exitCode |= testSerialization();
+         exitCode |= testFloatReads();
+         exitCode |= testDynamicMember();
+         exitCode |= testNoDebug();
+         exitCode |= testNoDebugNoAlloc();
 
          if (exitCode!=0)
             Sys.println("############# Errors running tests:\n   " + errors.join("\n   ") );

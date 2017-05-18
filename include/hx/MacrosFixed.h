@@ -16,6 +16,7 @@
 #define HX_DECLARE_CLASS7(ns7,ns6,ns5,ns4,ns3,ns2,ns1,klass) namespace ns7 { HX_DECLARE_CLASS6(ns6,ns5,ns4,ns3,ns2,ns1,klass) }
 #define HX_DECLARE_CLASS8(ns8,ns7,ns6,ns5,ns4,ns3,ns2,ns1,klass) namespace ns8 { HX_DECLARE_CLASS7(ns7,ns6,ns5,ns4,ns3,ns2,ns1,klass) }
 #define HX_DECLARE_CLASS9(ns9,ns8,ns7,ns6,ns5,ns4,ns3,ns2,ns1,klass) namespace ns9 { HX_DECLARE_CLASS8(ns8,ns7,ns6,ns5,ns4,ns3,ns2,ns1,klass) }
+#define HX_DECLARE_CLASS10(ns10,ns9,ns8,ns7,ns6,ns5,ns4,ns3,ns2,ns1,klass) namespace ns10 { HX_DECLARE_CLASS9(ns9,ns8,ns7,ns6,ns5,ns4,ns3,ns2,ns1,klass) }
 
 // ---- Enum ----------------------
 
@@ -54,8 +55,18 @@ static  ::Dynamic Create##enum_obj(::String inName,hx::DynamicArray inArgs) \
 
 // ---- Fields ----------------------
 
-#define HX_DO_RTTI_BASE \
-   bool __Is(hx::Object *inObj) const { return dynamic_cast<OBJ_ *>(inObj)!=0; } \
+#if (HXCPP_API_LEVEL<331)
+   #define HX_DO_RTTI_BASE \
+      bool __Is(hx::Object *inObj) const { return dynamic_cast<OBJ_ *>(inObj)!=0; }
+#else
+   #define HX_DO_RTTI_BASE
+#endif
+
+#if (HXCPP_API_LEVEL>331)
+   #define HX_IS_INSTANCE_OF bool _hx_isInstanceOf(int inClassId) { return inClassId==1 || inClassId==(int)_hx_ClassId; }
+#else
+   #define HX_IS_INSTANCE_OF
+#endif
 
 
 #define HX_DO_RTTI_ALL \

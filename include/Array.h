@@ -1,6 +1,5 @@
 #ifndef HX_ARRAY_H
 #define HX_ARRAY_H
-
 #include <cpp/FastIterator.h>
 
 // --- hx::ReturnNull ------------------------------------------------------
@@ -22,6 +21,15 @@ enum ArrayStore
    arrayObject,
 };
 
+enum ArrayConvertId
+{
+   aciAlwaysConvert = -4,
+   aciVirtualArray = -3,
+   aciStringArray  = -2,
+   aciObjectArray  = -1,
+   aciNotArray     = 0,
+   aciPodBase      = 1,
+};
 
 template<typename T> struct ReturnNull { typedef T type; };
 template<> struct ReturnNull<int> { typedef Dynamic type; };
@@ -62,6 +70,8 @@ template<typename FROM,typename TO>
 class ArrayIterator : public cpp::FastIterator_obj<TO>
 {
 public:
+   HX_IS_INSTANCE_OF enum { _hx_ClassId = hx::clsIdArrayIterator };
+
    ArrayIterator(Array<FROM> inArray) : mArray(inArray), mIdx(0) { }
 
    // Fast versions ...
@@ -88,12 +98,26 @@ public:
 namespace hx
 {
 
+// Also used by cpp::VirtualArray
+class HXCPP_EXTERN_CLASS_ATTRIBUTES ArrayCommon : public hx::Object
+{
+   protected:
+      int mArrayConvertId;
+   public:
+      // Plain old data element size - or 0 if not plain-old-data
+      int getArrayConvertId() const { return mArrayConvertId; }
+
+      #if (HXCPP_API_LEVEL>330)
+      virtual hx::Object *__GetRealObject() { return this; }
+      #endif
+};
+
 // --- hx::ArrayBase ----------------------------------------------------
 //
 // Base class that treats array contents as a slab of bytes.
 // The derived "Array_obj" adds strong typing to the "[]" operator
 
-class HXCPP_EXTERN_CLASS_ATTRIBUTES ArrayBase : public hx::Object
+class HXCPP_EXTERN_CLASS_ATTRIBUTES ArrayBase : public ArrayCommon
 {
 public:
    ArrayBase(int inSize,int inReserve,int inElementSize,bool inAtomic);
@@ -105,6 +129,8 @@ public:
    static void __boot();
 
    typedef hx::Object super;
+
+   HX_IS_INSTANCE_OF enum { _hx_ClassId = hx::clsIdArrayBase };
 
    // Used by cpp.ArrayBase
    inline int getElementSize() const { return GetElementSize(); }
@@ -119,6 +145,12 @@ public:
    hx::Class __GetClass() const { return __mClass; }
    String toString();
    String __ToString() const;
+
+
+   #if (HXCPP_API_LEVEL>330)
+   int __Compare(const hx::Object *inRHS) const;
+   #endif
+
 
    void setData(void *inData, int inElements)
    {
@@ -289,6 +321,8 @@ public:
 
    void reserve(int inN) const;
 
+   inline int capacity() const { return mAlloc; }
+
    // Set numeric values to 0, pointers to null, bools to false
    void zero(Dynamic inFirst, Dynamic inCount);
 
@@ -308,13 +342,17 @@ public:
    inline Dynamic __get(int inIndex) const { return __GetItem(inIndex); }
 
    // Plain old data element size - or 0 if not plain-old-data
-   int getPodSize() const { return mPodSize; }
+   int getArrayConvertId() const { return mArrayConvertId; }
 
    mutable int length;
+
+   static inline int baseOffset() { return (int)offsetof(ArrayBase,mBase); }
+   static inline int allocOffset() { return (int)offsetof(ArrayBase,mAlloc); }
+   static inline int lengthOffset() { return (int)offsetof(ArrayBase,length); }
+
 protected:
    mutable int mAlloc;
    mutable char  *mBase;
-   int mPodSize;
 };
 
 } // end namespace hx for ArrayBase
@@ -369,6 +407,17 @@ template<> inline unsigned char *NewNull<unsigned char>() { unsigned char u=0; r
 
 }
 
+template<typename T> struct ArrayClassId { enum { id=hx::clsIdArrayObject }; };
+template<> struct ArrayClassId<unsigned char> { enum { id=hx::clsIdArrayByte }; };
+template<> struct ArrayClassId<signed char> { enum { id=hx::clsIdArrayByte }; };
+template<> struct ArrayClassId<unsigned short> { enum { id=hx::clsIdArrayShort }; };
+template<> struct ArrayClassId<signed short> { enum { id=hx::clsIdArrayShort }; };
+template<> struct ArrayClassId<unsigned int> { enum { id=hx::clsIdArrayInt }; };
+template<> struct ArrayClassId<signed int> { enum { id=hx::clsIdArrayInt }; };
+template<> struct ArrayClassId<float> { enum { id=hx::clsIdArrayFloat32 }; };
+template<> struct ArrayClassId<double> { enum { id=hx::clsIdArrayFloat64 }; };
+template<> struct ArrayClassId<String> { enum { id=hx::clsIdArrayString }; };
+
 // sort...
 #include <algorithm>
 
@@ -381,6 +430,8 @@ class Array_obj : public hx::ArrayBase
    typedef typename hx::ReturnNull<ELEM_>::type NullType;
 
 public:
+   enum { _hx_ClassId = ArrayClassId<ELEM_>::id };
+
 
    Array_obj(int inSize,int inReserve) :
         hx::ArrayBase(inSize,inReserve,sizeof(ELEM_),!hx::ContainsPointers<ELEM_>()) { }
@@ -390,8 +441,15 @@ public:
    static Array<ELEM_> __new(int inSize=0,int inReserve=0);
    static Array<ELEM_> fromData(const ELEM_ *inData,int inCount);
 
-   virtual bool AllocAtomic() const { return !hx::ContainsPointers<ELEM_>(); }
 
+#if (HXCPP_API_LEVEL>331)
+   bool _hx_isInstanceOf(int inClassId)
+   {
+      return inClassId==1 || inClassId==(int)hx::clsIdArrayBase || inClassId==(int)_hx_ClassId;
+   }
+#endif
+
+   virtual bool AllocAtomic() const { return !hx::ContainsPointers<ELEM_>(); }
 
    virtual Dynamic __GetItem(int inIndex) const { return __get(inIndex); }
    virtual Dynamic __SetItem(int inIndex,Dynamic inValue)
@@ -532,8 +590,6 @@ public:
    { 
       if( idx < 0 ) idx += length; 
       if (idx>=length || idx<0) return false; 
-
-      ELEM_ e = __get(idx); 
       RemoveElement(idx); 
       return true; 
    }
@@ -690,6 +746,13 @@ public:
       return (hx::ArrayStore) hx::ArrayTraits<ELEM_>::StoreType;
    }
 
+   inline ELEM_ &setCtx(hx::Ctx *_hx_ctx, int inIdx, ELEM_ inValue)
+   {
+      ELEM_ &elem = Item(inIdx);
+      HX_ARRAY_WB(this,inIdx,inValue);
+      return elem = inValue;
+   }
+
 
    // Dynamic interface
    #if (HXCPP_API_LEVEL < 330)
@@ -748,6 +811,8 @@ public:
 
    virtual void set(int inIndex, const cpp::Variant &inValue) { Item(inIndex) = ELEM_(inValue); }
    virtual void setUnsafe(int inIndex, const cpp::Variant &inValue) { *(ELEM_ *)(mBase + inIndex*sizeof(ELEM_)) = ELEM_(inValue); }
+
+
    #endif
 };
 
@@ -924,7 +989,6 @@ public:
    inline bool operator==(const cpp::VirtualArray &varray) const { return varray==*this; }
    inline bool operator!=(const cpp::VirtualArray &varray) const { return varray!=*this; }
    #endif
-
 
 
    inline ELEM_ &operator[](int inIdx) { return CheckGetPtr()->Item(inIdx); }
